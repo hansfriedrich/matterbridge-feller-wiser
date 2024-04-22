@@ -4,11 +4,9 @@ import {
   DeviceTypes,
   DoorLock,
   DoorLockCluster,
-  FlowMeasurement,
   LevelControlCluster,
   OnOffCluster,
   PlatformConfig,
-  TemperatureMeasurement,
   Thermostat,
   ThermostatCluster,
   WindowCovering,
@@ -16,10 +14,65 @@ import {
   onOffSwitch,
 } from 'matterbridge';
 
+import fetch from 'node-fetch';
+
 import { Matterbridge, MatterbridgeDevice, MatterbridgeDynamicPlatform } from 'matterbridge';
 import { AnsiLogger } from 'node-ansi-logger';
 
-export class ExampleMatterbridgeDynamicPlatform extends MatterbridgeDynamicPlatform {
+export type ResponseStatus = 'success' | 'error';
+export interface DataLoadItemWithId {
+  id: string;
+  name: string;
+  unused?: boolean;
+  type: 'onoff' | 'dim' | 'motor' | 'dali';
+  subtype: string;
+  device: string;
+  channel: string;
+  state: State;
+}
+type State = { bri: number } | { running: boolean; pos: number; angle: number };
+function isOnOffState(checkObj: State): checkObj is { bri: number } {
+  const optionalOnOffState = checkObj as { bri: number };
+  return optionalOnOffState !== null && typeof optionalOnOffState === 'object' && optionalOnOffState.bri !== undefined;
+}
+
+export interface DataDeviceBasicPropertiesItemWithId {
+  id: string;
+  last_seen: number;
+  a: {
+    fw_id: string;
+    hw_id: string;
+    fw_revision: string;
+    comm_ref: string;
+    address: string;
+    nubes_id: number;
+    comm_name: string;
+    serial_nr: string;
+  };
+  c: {
+    fw_id: string;
+    hw_id: string;
+    fw_version: string;
+    comm_ref: string;
+    cmd_matrix: string;
+    nubes_id: number;
+    comm_name: string;
+    serial_nr: string;
+  };
+}
+
+export interface DataDeviceAllPropertiesItem extends DataDeviceBasicPropertiesItemWithId {
+  inputs: Array<{
+    type: string;
+  }>;
+  outputs: Array<{
+    load: number;
+    type: string;
+    sub_type: string;
+  }>;
+}
+
+export class FellerWiserPlatform extends MatterbridgeDynamicPlatform {
   switch: MatterbridgeDevice | undefined;
   light: MatterbridgeDevice | undefined;
   outlet: MatterbridgeDevice | undefined;
@@ -33,12 +86,32 @@ export class ExampleMatterbridgeDynamicPlatform extends MatterbridgeDynamicPlatf
   lockInterval: NodeJS.Timeout | undefined;
   thermoInterval: NodeJS.Timeout | undefined;
 
+  baseUrl: string;
+  baseHeaders: { Authorization: string };
+
   constructor(matterbridge: Matterbridge, log: AnsiLogger, config: PlatformConfig) {
     super(matterbridge, log, config);
+    this.baseUrl = 'http://' + config.ip + '/api/';
+    this.baseHeaders = { Authorization: 'Bearer ' + config.accessToken };
   }
 
   override async onStart(reason?: string) {
     this.log.info('onStart called with reason:', reason ?? 'none');
+
+    // REQUIRED CONFIGS: ip, accessToken
+    if (!this.config.ip) throw new Error('ip address in config required');
+    if (!this.config.accessToken) throw new Error('accessToken in config required');
+
+    // receive all devices from the wifi-device
+    const data = (await (await fetch(this.baseUrl + '/devices', { headers: this.baseHeaders })).json()) as { status: string; data: Array<DataDeviceBasicPropertiesItemWithId> };
+    if (data.status === 'success') {
+      const devicesList = data.data;
+      for (const device of devicesList) {
+        this.createFellerDevice(device);
+      }
+    }
+
+    //EXAMPLECODE
 
     // Create a switch device
     this.switch = new MatterbridgeDevice(onOffSwitch);
@@ -103,28 +176,6 @@ export class ExampleMatterbridgeDynamicPlatform extends MatterbridgeDynamicPlatf
       this.log.debug(`Command moveToColorTemperature called request: ${request.colorTemperatureMireds} attributes: ${attributes.colorTemperatureMireds?.getLocal()}`);
     });
 
-    // Create an outlet device
-    this.outlet = new MatterbridgeDevice(DeviceTypes.ON_OFF_PLUGIN_UNIT);
-    this.outlet.createDefaultIdentifyClusterServer();
-    this.outlet.createDefaultGroupsClusterServer();
-    this.outlet.createDefaultScenesClusterServer();
-    this.outlet.createDefaultBridgedDeviceBasicInformationClusterServer('Bridged device 4', '0x29252164', 0xfff1, 'Luligu', 'Dynamic device 4');
-    this.outlet.createDefaultPowerSourceWiredClusterServer();
-    this.outlet.createDefaultOnOffClusterServer();
-    await this.registerDevice(this.outlet);
-
-    this.outlet.addCommandHandler('identify', async ({ request: { identifyTime } }) => {
-      this.log.info(`Command identify called identifyTime:${identifyTime}`);
-    });
-    this.outlet.addCommandHandler('on', async () => {
-      this.outlet?.getClusterServer(OnOffCluster)?.setOnOffAttribute(true);
-      this.log.info('Command on called');
-    });
-    this.outlet.addCommandHandler('off', async () => {
-      this.outlet?.getClusterServer(OnOffCluster)?.setOnOffAttribute(false);
-      this.log.info('Command off called');
-    });
-
     // Create a window covering device
     this.cover = new MatterbridgeDevice(DeviceTypes.WINDOW_COVERING);
     this.cover.createDefaultIdentifyClusterServer();
@@ -168,73 +219,101 @@ export class ExampleMatterbridgeDynamicPlatform extends MatterbridgeDynamicPlatf
         this.log.debug(`Command goToLiftPercentage called. Attributes: operationalStatus: ${operationalStatus?.getLocal().lift}`);
       },
     );
+  }
 
-    // Create a lock device
-    this.lock = new MatterbridgeDevice(DeviceTypes.DOOR_LOCK);
-    this.lock.createDefaultIdentifyClusterServer();
-    this.lock.createDefaultBridgedDeviceBasicInformationClusterServer('Bridged device 5', '0x96352164', 0xfff1, 'Luligu', 'Dynamic device 5');
-    this.lock.createDefaultPowerSourceRechargeableBatteryClusterServer(30);
-    this.lock.createDefaultDoorLockClusterServer();
-    await this.registerDevice(this.lock);
+  async createFellerDevice(deviceBasicProperties: DataDeviceBasicPropertiesItemWithId) {
+    this.log.debug('creating device ', deviceBasicProperties);
 
-    this.lock.addCommandHandler('identify', async ({ request: { identifyTime } }) => {
-      this.log.info(`Command identify called identifyTime:${identifyTime}`);
-    });
-    this.lock.addCommandHandler('lockDoor', async () => {
-      this.lock?.getClusterServer(DoorLockCluster)?.setLockStateAttribute(DoorLock.LockState.Locked);
-      this.log.info('Command lockDoor called');
-    });
-    this.lock.addCommandHandler('unlockDoor', async () => {
-      this.lock?.getClusterServer(DoorLockCluster)?.setLockStateAttribute(DoorLock.LockState.Unlocked);
-      this.log.info('Command unlockDoor called');
-    });
+    const deviceMap = new Map([
+      ['onoff', DeviceTypes.onOffSwitch],
+      ['dim', DeviceTypes.onOffSwitch],
+      ['motor', DeviceTypes.cover],
+      ['dali', DeviceTypes.onOffSwitch],
+    ]);
 
-    // Create a thermostat device
-    this.thermo = new MatterbridgeDevice(DeviceTypes.THERMOSTAT);
-    this.thermo.createDefaultIdentifyClusterServer();
-    this.thermo.createDefaultGroupsClusterServer();
-    this.thermo.createDefaultScenesClusterServer();
-    this.thermo.createDefaultBridgedDeviceBasicInformationClusterServer('Bridged device 6', '0x96382164', 0xfff1, 'Luligu', 'Dynamic device 6');
-    this.thermo.createDefaultPowerSourceRechargeableBatteryClusterServer(70);
-    this.thermo.createDefaultThermostatClusterServer(20, 18, 22);
+    // get the detailed infos of the device since there are no outputs in the baseinfos
+    const deviceInfosResponse = (await (await fetch(this.baseUrl + 'devices/' + deviceBasicProperties.id, { headers: this.baseHeaders })).json()) as {
+      status: string;
+      data: DataDeviceAllPropertiesItem;
+    };
 
-    const flowChild = this.thermo.addChildDeviceTypeWithClusterServer([DeviceTypes.FLOW_SENSOR], [FlowMeasurement.Cluster.id]);
-    flowChild.getClusterServer(FlowMeasurement.Cluster)?.setMeasuredValueAttribute(1 * 10);
-
-    const tempChild = this.thermo.addChildDeviceTypeWithClusterServer([DeviceTypes.TEMPERATURE_SENSOR], [TemperatureMeasurement.Cluster.id]);
-    tempChild.getClusterServer(TemperatureMeasurement.Cluster)?.setMeasuredValueAttribute(41 * 100);
-
-    await this.registerDevice(this.thermo);
-
-    this.thermo.addCommandHandler('identify', async ({ request: { identifyTime } }) => {
-      this.log.info(`Command identify called identifyTime:${identifyTime}`);
-    });
-    this.thermo.addCommandHandler('setpointRaiseLower', async ({ request: { mode, amount }, attributes }) => {
-      const lookupSetpointAdjustMode = ['Heat', 'Cool', 'Both'];
-      this.log.info(`Command setpointRaiseLower called with mode: ${lookupSetpointAdjustMode[mode]} amount: ${amount / 10}`);
-      if (mode === Thermostat.SetpointAdjustMode.Heat && attributes.occupiedHeatingSetpoint) {
-        const setpoint = attributes.occupiedHeatingSetpoint?.getLocal() / 100 + amount / 10;
-        attributes.occupiedHeatingSetpoint.setLocal(setpoint * 100);
-        this.log.info('Set occupiedHeatingSetpoint:', setpoint);
+    // iterate over the outputs of this device and get the load info
+    for (const { output, index } of deviceInfosResponse.data.outputs.map((output, index) => ({ index, output }))) {
+      const loadInfo = (await (await fetch(this.baseUrl + 'loads/' + output.load, { headers: this.baseHeaders })).json()) as DataLoadItemWithId;
+      const deviceTypeDefinition = deviceMap.get(loadInfo.type);
+      if (deviceTypeDefinition === undefined) {
+        this.log.warn('device type ', loadInfo.type, ' not supported');
+        continue;
       }
-      if (mode === Thermostat.SetpointAdjustMode.Cool && attributes.occupiedCoolingSetpoint) {
-        const setpoint = attributes.occupiedCoolingSetpoint.getLocal() / 100 + amount / 10;
-        attributes.occupiedCoolingSetpoint.setLocal(setpoint * 100);
-        this.log.info('Set occupiedCoolingSetpoint:', setpoint);
+
+      const deviceName = loadInfo.name || deviceInfosResponse.data.c.comm_name || deviceInfosResponse.data.a.comm_name;
+      const vendorId = 0xfff1;
+      const vendorName = 'Feller AG';
+      const serialNumber = (deviceInfosResponse.data.c.serial_nr || deviceInfosResponse.data.a.serial_nr) + '_' + index;
+      const productName = deviceInfosResponse.data.c.comm_name || deviceInfosResponse.data.a.comm_name;
+      const softwareVersion = Number(deviceInfosResponse.data.c.fw_id || deviceInfosResponse.data.a.fw_id);
+      const softwareVersionString = deviceInfosResponse.data.c.fw_version || deviceInfosResponse.data.a.fw_revision;
+      const hardwareVersion = Number(deviceInfosResponse.data.c.hw_id || deviceInfosResponse.data.a.hw_id);
+      const hardwareVersionString = undefined;
+
+      const device = new MatterbridgeDevice(deviceTypeDefinition);
+      device.createDefaultIdentifyClusterServer();
+      device.createDefaultGroupsClusterServer();
+      device.createDefaultScenesClusterServer();
+      device.createDefaultBridgedDeviceBasicInformationClusterServer(
+        deviceName,
+        serialNumber,
+        vendorId,
+        vendorName,
+        productName,
+        softwareVersion,
+        softwareVersionString,
+        hardwareVersion,
+        hardwareVersionString,
+      );
+
+      device.addCommandHandler('identify', async ({ request: { identifyTime } }) => {
+        this.log.info(`Command identify called identifyTime:${identifyTime}`);
+        // reflect the identify command to the device
+        fetch(this.baseUrl + '');
+      });
+
+      device.createDefaultPowerSourceWiredClusterServer();
+
+      if ((loadInfo.device === 'onoff' || loadInfo.device === 'dim' || loadInfo.device === 'dali') && isOnOffState(loadInfo.state)) {
+        device.createDefaultOnOffClusterServer(loadInfo.state.bri !== 0);
+        device.addCommandHandler('on', async () => {
+          fetch(this.baseUrl + 'load/' + loadInfo.id, { method: 'post', headers: this.baseHeaders })
+            .then((response) => response.json() as Promise<{ status: string; data: DataLoadItemWithId }>)
+            .then((json) => {
+              if (json.status === 'success') {
+                const currentLoadInfo = json.data;
+                if (isOnOffState(currentLoadInfo.state)) {
+                  device.getClusterServer(OnOffCluster)?.setOnOffAttribute(currentLoadInfo.state.bri !== 0);
+                }
+              }
+            });
+        });
+        device.addCommandHandler('off', async () => {
+          fetch(this.baseUrl + 'load/' + loadInfo.id, { method: 'post', headers: this.baseHeaders })
+            .then((response) => response.json() as Promise<{ status: string; data: DataLoadItemWithId }>)
+            .then((json) => {
+              if (json.status === 'success') {
+                const currentLoadInfo = json.data;
+                if (isOnOffState(currentLoadInfo.state)) {
+                  device.getClusterServer(OnOffCluster)?.setOnOffAttribute(currentLoadInfo.state.bri === 0);
+                }
+              }
+            });
+        });
+
+        if (loadInfo.device === 'dim' || loadInfo.device === 'dali') {
+          device.createDefaultLevelControlClusterServer();
+          if (loadInfo.device === 'dali') {
+            device.createDefaultColorControlClusterServer();
+          }
+        }
       }
-    });
-    const thermostat = this.thermo.getClusterServer(ThermostatCluster.with(Thermostat.Feature.Heating, Thermostat.Feature.Cooling, Thermostat.Feature.AutoMode));
-    if (thermostat) {
-      thermostat.subscribeSystemModeAttribute(async (value) => {
-        const lookupSystemMode = ['Off', 'Auto', '', 'Cool', 'Heat', 'EmergencyHeat', 'Precooling', 'FanOnly', 'Dry', 'Sleep'];
-        this.log.info('Subscribe systemMode called with:', lookupSystemMode[value]);
-      });
-      thermostat.subscribeOccupiedHeatingSetpointAttribute(async (value) => {
-        this.log.info('Subscribe occupiedHeatingSetpoint called with:', value / 100);
-      });
-      thermostat.subscribeOccupiedCoolingSetpointAttribute(async (value) => {
-        this.log.info('Subscribe occupiedCoolingSetpoint called with:', value / 100);
-      });
     }
   }
 
