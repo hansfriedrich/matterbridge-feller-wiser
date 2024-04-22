@@ -1,6 +1,6 @@
 import { Matterbridge, PlatformConfig } from 'matterbridge';
 import { AnsiLogger } from 'node-ansi-logger';
-import { ExampleMatterbridgeDynamicPlatform } from './platform.js';
+import { FellerWiserPlatform } from './platform.js';
 
 /**
  * This is the standard interface for Matterbridge plugins.
@@ -11,6 +11,6 @@ import { ExampleMatterbridgeDynamicPlatform } from './platform.js';
  * @param {PlatformConfig} config - The platform configuration.
  * @returns {ExampleMatterbridgeDynamicPlatform} The initialized platform.
  */
-export default function initializePlugin(matterbridge: Matterbridge, log: AnsiLogger, config: PlatformConfig): ExampleMatterbridgeDynamicPlatform {
-  return new ExampleMatterbridgeDynamicPlatform(matterbridge, log, config);
+export default function initializePlugin(matterbridge: Matterbridge, log: AnsiLogger, config: PlatformConfig): FellerWiserPlatform {
+  return new FellerWiserPlatform(matterbridge, log, config);
 }
