@@ -275,7 +275,11 @@ export class FellerWiserPlatform extends MatterbridgeDynamicPlatform {
       device.addCommandHandler('identify', async ({ request: { identifyTime } }) => {
         this.log.info(`Command identify called identifyTime:${identifyTime}`);
         // reflect the identify command to the device
-        fetch(this.baseUrl + '');
+        fetch(this.baseUrl + 'load/' + loadInfo.id + '/ping', {
+          method: 'put',
+          body: JSON.stringify({ time_ms: identifyTime, blink_patter: 'ramp', color: '#505050' }),
+          headers: this.baseHeaders,
+        });
       });
 
       device.createDefaultPowerSourceWiredClusterServer();
@@ -309,11 +313,53 @@ export class FellerWiserPlatform extends MatterbridgeDynamicPlatform {
 
         if (loadInfo.device === 'dim' || loadInfo.device === 'dali') {
           device.createDefaultLevelControlClusterServer();
+          device.addCommandHandler('moveToLevel', async ({ request: { level }, attributes: { currentLevel } }) => {
+            this.log.debug(loadInfo.id + ' moveToLevel ' + level + ' from current level ' + currentLevel);
+            fetch(this.baseUrl + 'load/' + loadInfo.id, {
+              method: 'post',
+              headers: this.baseHeaders,
+              body: JSON.stringify({
+                bri: level,
+              }),
+            })
+              .then((response) => response.json() as Promise<{ status: string; data: { bri: number } }>)
+              .then((json) => {
+                const bri = json.data.bri;
+                device.getClusterServer(LevelControlCluster)?.setCurrentLevelAttribute(bri);
+              });
+          });
+          device.addCommandHandler('moveToLevelWithOnOff', async ({ request: { level }, attributes: { currentLevel } }) => {
+            this.log.debug(loadInfo.id + ' moveToLevelWithOnOff ' + level + ' from current level ' + currentLevel);
+            fetch(this.baseUrl + 'load/' + loadInfo.id, {
+              method: 'post',
+              headers: this.baseHeaders,
+              body: JSON.stringify({
+                bri: level,
+              }),
+            })
+              .then((response) => response.json() as Promise<{ status: string; data: { bri: number } }>)
+              .then((json) => {
+                const bri = json.data.bri;
+                device.getClusterServer(LevelControlCluster)?.setCurrentLevelAttribute(bri);
+              });
+          });
           if (loadInfo.device === 'dali') {
             device.createDefaultColorControlClusterServer();
+            device.addCommandHandler('moveToHueAndSaturation', async ({ request: { hue, saturation }, attributes: { currentHue, currentSaturation } }) => {
+              this.light?.getClusterServer(ColorControlCluster.with(ColorControl.Feature.HueSaturation))?.setCurrentHueAttribute(hue);
+              this.light?.getClusterServer(ColorControlCluster.with(ColorControl.Feature.HueSaturation))?.setCurrentSaturationAttribute(saturation);
+              this.log.debug(
+                `Command moveToHueAndSaturation called request: hue ${hue} saturation ${saturation} attributes: hue ${currentHue?.getLocal()} saturation ${currentSaturation?.getLocal()}`,
+              );
+            });
+            device.addCommandHandler('moveToColorTemperature', async ({ request, attributes }) => {
+              this.light?.getClusterServer(ColorControl.Complete)?.setColorTemperatureMiredsAttribute(request.colorTemperatureMireds);
+              this.log.debug(`Command moveToColorTemperature called request: ${request.colorTemperatureMireds} attributes: ${attributes.colorTemperatureMireds?.getLocal()}`);
+            });
           }
         }
       }
+      this.matterbridge.addBridgedDevice(this.name, device);
     }
   }
 
