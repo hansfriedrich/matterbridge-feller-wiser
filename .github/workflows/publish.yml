@@ -3,8 +3,6 @@ name: Publish to npm
 on:
   release:
     types: [created]
-  schedule:
-    - cron: '0 0 * * *' # Run daily at 00:00 UTC
   workflow_dispatch:
 
 concurrency:
